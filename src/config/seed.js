@@ -20,6 +20,26 @@ async function seed() {
   `, [adminPassword]);
   console.log('  ✅ Admin user created: admin@cosmetix.co.ke / Admin@2024!');
 
+  // ----------------------------------------------------------
+  // MODULES - make sure they exist (migrate.js normally does
+  // this, but seed.js can run standalone too) and grant the
+  // admin access to every module.
+  // ----------------------------------------------------------
+  await pool.query(`
+    INSERT INTO modules (key_name, name, description) VALUES
+      ('cosmetics', 'Cosmetics', 'Original cosmetics shop — products, sales, POS'),
+      ('bookshop',  'Bookshop',  'Book inventory and sales')
+    ON DUPLICATE KEY UPDATE name = VALUES(name)
+  `);
+  const [[cosmeticsModule]] = await pool.query(`SELECT id FROM modules WHERE key_name = 'cosmetics'`);
+  const [[bookshopModule]] = await pool.query(`SELECT id FROM modules WHERE key_name = 'bookshop'`);
+  const [[adminUser]] = await pool.query(`SELECT id FROM users WHERE email = 'admin@cosmetix.co.ke'`);
+  await pool.query(
+    `INSERT IGNORE INTO user_modules (user_id, module_id) VALUES (?, ?), (?, ?)`,
+    [adminUser.id, cosmeticsModule.id, adminUser.id, bookshopModule.id]
+  );
+  console.log('  ✅ Modules ready: cosmetics, bookshop (admin has access to both)');
+
   // Insert default categories for a cosmetics shop
   const categories = [
     ['Skincare', 'Moisturizers, serums, toners, cleansers, sunscreen'],
@@ -36,11 +56,28 @@ async function seed() {
 
   for (const [name, description] of categories) {
     await pool.query(
-      'INSERT IGNORE INTO categories (name, description) VALUES (?, ?)',
-      [name, description]
+      'INSERT IGNORE INTO categories (name, description, module_id) VALUES (?, ?, ?)',
+      [name, description, cosmeticsModule.id]
     );
   }
-  console.log(`  ✅ ${categories.length} product categories created`);
+  console.log(`  ✅ ${categories.length} product categories created (cosmetics)`);
+
+  // A few starter categories + books for the new Bookshop module,
+  // so it isn't empty on first login — same item-management shape as cosmetics.
+  const bookCategories = [
+    ['Fiction', 'Novels, short stories, literary fiction'],
+    ['Non-Fiction', 'Biography, self-help, history, business'],
+    ['Children', 'Picture books, young readers, educational'],
+    ['Textbooks', 'School and university course books'],
+    ['Stationery', 'Pens, notebooks, exercise books, supplies'],
+  ];
+  for (const [name, description] of bookCategories) {
+    await pool.query(
+      'INSERT IGNORE INTO categories (name, description, module_id) VALUES (?, ?, ?)',
+      [name, description, bookshopModule.id]
+    );
+  }
+  console.log(`  ✅ ${bookCategories.length} product categories created (bookshop)`);
 
   // Insert sample products to demonstrate the system
   const [catRows] = await pool.query('SELECT id, name FROM categories');
@@ -93,13 +130,58 @@ async function seed() {
   for (const p of sampleProducts) {
     await pool.query(`
       INSERT IGNORE INTO products 
-        (category_id, name, brand, sku, search_keywords, buying_price, selling_price, 
+        (category_id, module_id, name, brand, sku, search_keywords, buying_price, selling_price, 
          quantity_in_stock, low_stock_threshold, unit)
-      VALUES (?,?,?,?,?,?,?,?,?,?)
-    `, [p.category_id, p.name, p.brand, p.sku, p.search_keywords,
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    `, [p.category_id, cosmeticsModule.id, p.name, p.brand, p.sku, p.search_keywords,
         p.buying_price, p.selling_price, p.quantity_in_stock, p.low_stock_threshold, p.unit]);
   }
-  console.log(`  ✅ ${sampleProducts.length} sample products created`);
+  console.log(`  ✅ ${sampleProducts.length} sample products created (cosmetics)`);
+
+  // Sample bookshop products — mirrors the cosmetics seed above
+  const [bookCatRows] = await pool.query(
+    'SELECT id, name FROM categories WHERE module_id = ?', [bookshopModule.id]
+  );
+  const bookCatMap = {};
+  bookCatRows.forEach(c => bookCatMap[c.name] = c.id);
+
+  const sampleBooks = [
+    {
+      category_id: bookCatMap['Fiction'],
+      name: 'Things Fall Apart',
+      brand: 'Chinua Achebe',
+      sku: 'BK-TFA-001',
+      search_keywords: 'things fall apart,achebe,fiction,novel,african literature',
+      buying_price: 450, selling_price: 700, quantity_in_stock: 25, low_stock_threshold: 5, unit: 'pcs'
+    },
+    {
+      category_id: bookCatMap['Textbooks'],
+      name: 'KCSE Mathematics Revision Guide',
+      brand: 'Longhorn',
+      sku: 'BK-MATH-KCSE',
+      search_keywords: 'kcse,mathematics,revision,textbook,school',
+      buying_price: 350, selling_price: 550, quantity_in_stock: 40, low_stock_threshold: 10, unit: 'pcs'
+    },
+    {
+      category_id: bookCatMap['Stationery'],
+      name: 'Exercise Book 200 Pages',
+      brand: 'Camlin',
+      sku: 'ST-EX-200',
+      search_keywords: 'exercise book,notebook,stationery,school supplies',
+      buying_price: 40, selling_price: 70, quantity_in_stock: 200, low_stock_threshold: 30, unit: 'pcs'
+    },
+  ];
+
+  for (const b of sampleBooks) {
+    await pool.query(`
+      INSERT IGNORE INTO products 
+        (category_id, module_id, name, brand, sku, search_keywords, buying_price, selling_price, 
+         quantity_in_stock, low_stock_threshold, unit)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    `, [b.category_id, bookshopModule.id, b.name, b.brand, b.sku, b.search_keywords,
+        b.buying_price, b.selling_price, b.quantity_in_stock, b.low_stock_threshold, b.unit]);
+  }
+  console.log(`  ✅ ${sampleBooks.length} sample products created (bookshop)`);
 
   console.log('\n✨ Seeding complete!\n');
   console.log('⚠️  IMPORTANT: Change admin password on first login!');

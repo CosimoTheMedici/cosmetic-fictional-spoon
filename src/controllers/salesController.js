@@ -36,8 +36,8 @@ async function createSale(req, res) {
 
     for (const item of items) {
       const [rows] = await conn.query(
-        'SELECT id, name, buying_price, selling_price, quantity_in_stock FROM products WHERE id = ? AND is_active = 1',
-        [item.product_id]
+        'SELECT id, name, buying_price, selling_price, quantity_in_stock FROM products WHERE id = ? AND is_active = 1 AND module_id = ?',
+        [item.product_id, req.module.id]
       );
 
       if (!rows.length) {
@@ -79,10 +79,10 @@ async function createSale(req, res) {
     // Insert sale header
     const [saleResult] = await conn.query(`
       INSERT INTO sales 
-        (reference_no, user_id, customer_name, customer_phone, subtotal, 
+        (reference_no, module_id, user_id, customer_name, customer_phone, subtotal, 
          discount_amount, total_amount, amount_paid, change_given, payment_method, mpesa_ref, notes)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    `, [refNo, req.user.id, customer_name, customer_phone, subtotal,
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `, [refNo, req.module.id, req.user.id, customer_name, customer_phone, subtotal,
         discount_amount, totalAmount, amount_paid, Math.max(0, changeGiven),
         payment_method, mpesa_ref, notes]);
 
@@ -137,8 +137,8 @@ async function getSales(req, res) {
     } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
 
-    let where = ["s.status = 'completed'"];
-    let params = [];
+    let where = ["s.status = 'completed'", 's.module_id = ?'];
+    let params = [req.module.id];
 
     if (date_from) {
       where.push('DATE(s.sold_at) >= ?');
@@ -204,8 +204,8 @@ async function getSale(req, res) {
     const [rows] = await pool.query(`
       SELECT s.*, u.name AS attendant_name
       FROM sales s JOIN users u ON s.user_id = u.id
-      WHERE s.id = ?
-    `, [req.params.id]);
+      WHERE s.id = ? AND s.module_id = ?
+    `, [req.params.id, req.module.id]);
 
     if (!rows.length) {
       return res.status(404).json({ message: 'Sale not found.' });

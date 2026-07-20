@@ -151,6 +151,33 @@ async function migrate() {
     // ----------------------------------------------------------
     // DAILY RECONCILIATION - End-of-day cash reconciliation
     // ----------------------------------------------------------
+    // ----------------------------------------------------------
+    // MODULES TABLE - Business lines sharing this system
+    // e.g. "cosmetics" (existing shop), "bookshop" (new)
+    // ----------------------------------------------------------
+    `CREATE TABLE IF NOT EXISTS modules (
+      id          INT AUTO_INCREMENT PRIMARY KEY,
+      key_name    VARCHAR(50) NOT NULL UNIQUE COMMENT 'e.g. cosmetics, bookshop - used in URLs',
+      name        VARCHAR(100) NOT NULL COMMENT 'Display name e.g. Cosmetics, Bookshop',
+      description TEXT,
+      is_active   TINYINT(1) DEFAULT 1,
+      created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
+
+    // ----------------------------------------------------------
+    // USER_MODULES TABLE - Which modules each user can access
+    // A user with no rows here (and role != admin) sees nothing
+    // ----------------------------------------------------------
+    `CREATE TABLE IF NOT EXISTS user_modules (
+      id          INT AUTO_INCREMENT PRIMARY KEY,
+      user_id     INT NOT NULL,
+      module_id   INT NOT NULL,
+      created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uniq_user_module (user_id, module_id),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (module_id) REFERENCES modules(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`,
+
     `CREATE TABLE IF NOT EXISTS daily_reconciliations (
       id                  INT AUTO_INCREMENT PRIMARY KEY,
       reconciliation_date DATE NOT NULL UNIQUE,
@@ -179,6 +206,111 @@ async function migrate() {
       console.error(`  ❌ Error creating "${tableName}":`, err.message);
     }
   }
+
+  // ----------------------------------------------------------
+  // ADD module_id COLUMNS to existing tables (item-management
+  // and sales scoping). Uses IF NOT EXISTS (MySQL 8+ / Aiven).
+  // ----------------------------------------------------------
+  const alters = [
+    `ALTER TABLE categories ADD COLUMN IF NOT EXISTS module_id INT NULL AFTER id`,
+    `ALTER TABLE products   ADD COLUMN IF NOT EXISTS module_id INT NULL AFTER id`,
+    `ALTER TABLE sales      ADD COLUMN IF NOT EXISTS module_id INT NULL AFTER id`,
+  ];
+  for (const alter of alters) {
+    try {
+      await pool.query(alter);
+      console.log(`  ✅ ${alter.split('ADD COLUMN')[0].trim()} has module_id`);
+    } catch (err) {
+      console.error(`  ❌ Error altering table:`, err.message);
+    }
+  }
+
+  // Category names used to be globally unique; now that categories are
+  // scoped per module, "Fiction" (bookshop) shouldn't collide with a
+  // cosmetics category of the same name. Swap the unique constraint.
+  try {
+    await pool.query(`ALTER TABLE categories DROP INDEX name`);
+  } catch (err) {
+    if (!/check that column\/key exists|doesn't exist/i.test(err.message)) {
+      console.error('  ⚠️  Could not drop old unique index on categories.name:', err.message);
+    }
+  }
+  try {
+    await pool.query(`ALTER TABLE categories ADD UNIQUE KEY uniq_module_category (module_id, name)`);
+  } catch (err) {
+    if (!/Duplicate|already exists/i.test(err.message)) {
+      console.error('  ⚠️  Could not add per-module unique index on categories:', err.message);
+    }
+  }
+
+  // Same reasoning for product SKUs — scope uniqueness per module.
+  try {
+    await pool.query(`ALTER TABLE products DROP INDEX sku`);
+  } catch (err) {
+    if (!/check that column\/key exists|doesn't exist/i.test(err.message)) {
+      console.error('  ⚠️  Could not drop old unique index on products.sku:', err.message);
+    }
+  }
+  try {
+    await pool.query(`ALTER TABLE products ADD UNIQUE KEY uniq_module_sku (module_id, sku)`);
+  } catch (err) {
+    if (!/Duplicate|already exists/i.test(err.message)) {
+      console.error('  ⚠️  Could not add per-module unique index on products.sku:', err.message);
+    }
+  }
+
+  // Foreign keys (best-effort — ignore if they already exist)
+  const fks = [
+    `ALTER TABLE categories ADD CONSTRAINT fk_categories_module FOREIGN KEY (module_id) REFERENCES modules(id)`,
+    `ALTER TABLE products   ADD CONSTRAINT fk_products_module   FOREIGN KEY (module_id) REFERENCES modules(id)`,
+    `ALTER TABLE sales      ADD CONSTRAINT fk_sales_module      FOREIGN KEY (module_id) REFERENCES modules(id)`,
+  ];
+  for (const fk of fks) {
+    try {
+      await pool.query(fk);
+    } catch (err) {
+      if (!/Duplicate|already exists/i.test(err.message)) {
+        console.error(`  ⚠️  FK skipped:`, err.message);
+      }
+    }
+  }
+
+  // ----------------------------------------------------------
+  // SEED the two modules + backfill existing data to "cosmetics"
+  // so nothing that already exists silently disappears.
+  // ----------------------------------------------------------
+  await pool.query(`
+    INSERT INTO modules (key_name, name, description) VALUES
+      ('cosmetics', 'Cosmetics', 'Original cosmetics shop — products, sales, POS'),
+      ('bookshop',  'Bookshop',  'Book inventory and sales')
+    ON DUPLICATE KEY UPDATE name = VALUES(name)
+  `);
+  const [[cosmeticsModule]] = await pool.query(
+    `SELECT id FROM modules WHERE key_name = 'cosmetics'`
+  );
+  const cosmeticsId = cosmeticsModule.id;
+
+  await pool.query(`UPDATE categories SET module_id = ? WHERE module_id IS NULL`, [cosmeticsId]);
+  await pool.query(`UPDATE products   SET module_id = ? WHERE module_id IS NULL`, [cosmeticsId]);
+  await pool.query(`UPDATE sales      SET module_id = ? WHERE module_id IS NULL`, [cosmeticsId]);
+  console.log(`  ✅ Modules seeded, existing data backfilled to "cosmetics"`);
+
+  // Give every existing admin access to BOTH modules (no surprises),
+  // and every existing attendant access to "cosmetics" only (preserves current behavior).
+  const [allModules] = await pool.query(`SELECT id, key_name FROM modules`);
+  const [existingUsers] = await pool.query(`SELECT id, role FROM users`);
+  for (const u of existingUsers) {
+    const modulesToGrant = u.role === 'admin'
+      ? allModules
+      : allModules.filter(m => m.key_name === 'cosmetics');
+    for (const m of modulesToGrant) {
+      await pool.query(
+        `INSERT IGNORE INTO user_modules (user_id, module_id) VALUES (?, ?)`,
+        [u.id, m.id]
+      );
+    }
+  }
+  console.log(`  ✅ Existing users granted default module access`);
 
   console.log('\n✨ Migration complete!\n');
   console.log('Next step: Run "node src/config/seed.js" to create the admin user.');

@@ -38,6 +38,24 @@ async function login(req, res) {
       { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
     );
 
+    // Fetch the modules this user can access (admins get all active modules)
+    let modules;
+    if (user.role === 'admin') {
+      const [rows] = await pool.query(
+        'SELECT id, key_name, name FROM modules WHERE is_active = 1 ORDER BY name'
+      );
+      modules = rows;
+    } else {
+      const [rows] = await pool.query(
+        `SELECT m.id, m.key_name, m.name
+         FROM modules m
+         JOIN user_modules um ON um.module_id = m.id
+         WHERE um.user_id = ? AND m.is_active = 1`,
+        [user.id]
+      );
+      modules = rows;
+    }
+
     res.json({
       message: 'Login successful',
       token,
@@ -46,6 +64,7 @@ async function login(req, res) {
         name: user.name,
         email: user.email,
         role: user.role,
+        modules,
       }
     });
   } catch (err) {
@@ -60,7 +79,7 @@ async function login(req, res) {
  */
 async function register(req, res) {
   try {
-    const { name, email, password, role = 'attendant' } = req.body;
+    const { name, email, password, role = 'attendant', moduleIds = [] } = req.body;
 
     // Check if email already exists
     const [existing] = await pool.query(
@@ -79,6 +98,15 @@ async function register(req, res) {
       [name.trim(), email.toLowerCase().trim(), hashed, role]
     );
 
+    // Assign module access (ignored for admins — they see everything regardless)
+    if (Array.isArray(moduleIds) && moduleIds.length) {
+      const values = moduleIds.map(mid => [result.insertId, mid]);
+      await pool.query(
+        'INSERT IGNORE INTO user_modules (user_id, module_id) VALUES ?',
+        [values]
+      );
+    }
+
     res.status(201).json({
       message: 'User created successfully',
       userId: result.insertId
@@ -86,6 +114,33 @@ async function register(req, res) {
   } catch (err) {
     console.error('Register error:', err);
     res.status(500).json({ message: 'Server error during registration.' });
+  }
+}
+
+/**
+ * PUT /api/auth/users/:id/modules  (Admin only)
+ * Replace a user's module assignments entirely with the given list.
+ */
+async function updateUserModules(req, res) {
+  const conn = await pool.getConnection();
+  try {
+    const { id } = req.params;
+    const { moduleIds = [] } = req.body;
+
+    await conn.beginTransaction();
+    await conn.query('DELETE FROM user_modules WHERE user_id = ?', [id]);
+    if (Array.isArray(moduleIds) && moduleIds.length) {
+      const values = moduleIds.map(mid => [id, mid]);
+      await conn.query('INSERT INTO user_modules (user_id, module_id) VALUES ?', [values]);
+    }
+    await conn.commit();
+    res.json({ message: 'Module access updated.' });
+  } catch (err) {
+    await conn.rollback();
+    console.error('Update user modules error:', err);
+    res.status(500).json({ message: 'Server error.' });
+  } finally {
+    conn.release();
   }
 }
 
@@ -134,7 +189,20 @@ async function listUsers(req, res) {
     const [rows] = await pool.query(
       'SELECT id, name, email, role, is_active, created_at FROM users ORDER BY created_at DESC'
     );
-    res.json({ users: rows });
+
+    // Attach each user's module assignments in one extra query
+    const [moduleRows] = await pool.query(`
+      SELECT um.user_id, m.id, m.key_name, m.name
+      FROM user_modules um
+      JOIN modules m ON m.id = um.module_id
+    `);
+    const modulesByUser = {};
+    for (const r of moduleRows) {
+      (modulesByUser[r.user_id] ||= []).push({ id: r.id, key_name: r.key_name, name: r.name });
+    }
+    const users = rows.map(u => ({ ...u, modules: modulesByUser[u.id] || [] }));
+
+    res.json({ users });
   } catch (err) {
     res.status(500).json({ message: 'Server error.' });
   }
@@ -161,4 +229,4 @@ async function toggleUser(req, res) {
   }
 }
 
-module.exports = { login, register, getMe, changePassword, listUsers, toggleUser };
+module.exports = { login, register, getMe, changePassword, listUsers, toggleUser, updateUserModules };

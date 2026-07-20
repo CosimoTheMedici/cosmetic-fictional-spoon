@@ -6,14 +6,20 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-const morgan = require('morgan');
+const morgan = require('morgan'); 
 const rateLimit = require('express-rate-limit');
 const { testConnection } = require('./config/database');
 
 // Import route modules
 const authRoutes = require('./routes/auth');
 const productRoutes = require('./routes/products');
-const { salesRouter, reportRouter, expenseRouter, categoryRouter } = require('./routes/index');
+const categoryRoutes = require('./routes/categories');
+const salesRoutes = require('./routes/sales');
+const reconciliationRoutes = require('./routes/reconciliation');
+const moduleRoutes = require('./routes/modules');
+const { reportRouter, expenseRouter } = require('./routes/index');
+const { authenticate } = require('./middleware/auth');
+const { loadModule, requireModuleAccess } = require('./middleware/module');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -51,11 +57,17 @@ app.use(express.urlencoded({ extended: true }));
 // API ROUTES
 // ============================================================
 app.use('/api/auth', authRoutes);
-app.use('/api/products', productRoutes);
-app.use('/api/sales', salesRouter);
+app.use('/api/modules', moduleRoutes);
+
+// Module-scoped item management + sales/POS — e.g. /api/cosmetics/products, /api/bookshop/products
+app.use('/api/:moduleKey/products', authenticate, loadModule, requireModuleAccess, productRoutes);
+app.use('/api/:moduleKey/categories', authenticate, loadModule, requireModuleAccess, categoryRoutes);
+app.use('/api/:moduleKey/sales', authenticate, loadModule, requireModuleAccess, salesRoutes);
+
+// Shop-wide (not module-scoped) — admin-only financial views
+app.use('/api/reconciliation', reconciliationRoutes);
 app.use('/api/reports', reportRouter);
 app.use('/api/expenses', expenseRouter);
-app.use('/api/categories', categoryRouter);
 
 // Health check — useful for monitoring
 app.get('/api/health', (req, res) => {

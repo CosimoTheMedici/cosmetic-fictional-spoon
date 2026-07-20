@@ -14,8 +14,8 @@ async function getProducts(req, res) {
     const { search, category, low_stock, page = 1, limit = 50 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
 
-    let where = ['p.is_active = 1'];
-    let params = [];
+    let where = ['p.is_active = 1', 'p.module_id = ?'];
+    let params = [req.module.id];
 
     // Full-text search across name, brand, and search_keywords
     if (search && search.trim()) {
@@ -87,8 +87,8 @@ async function getProduct(req, res) {
       SELECT p.*, c.name AS category_name
       FROM products p
       LEFT JOIN categories c ON p.category_id = c.id
-      WHERE p.id = ?
-    `, [req.params.id]);
+      WHERE p.id = ? AND p.module_id = ?
+    `, [req.params.id, req.module.id]);
 
     if (!rows.length) {
       return res.status(404).json({ message: 'Product not found.' });
@@ -134,10 +134,10 @@ async function createProduct(req, res) {
 
     const [result] = await pool.query(`
       INSERT INTO products 
-        (category_id, name, brand, description, sku, barcode, search_keywords,
+        (category_id, module_id, name, brand, description, sku, barcode, search_keywords,
          buying_price, selling_price, quantity_in_stock, low_stock_threshold, unit)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    `, [category_id, name, brand, description, sku, barcode, search_keywords,
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `, [category_id, req.module.id, name, brand, description, sku, barcode, search_keywords,
         buying_price, selling_price, quantity_in_stock, low_stock_threshold, unit]);
 
     res.status(201).json({
@@ -167,7 +167,7 @@ async function updateProduct(req, res) {
 
     // Fetch current prices before update
     const [current] = await conn.query(
-      'SELECT buying_price, selling_price FROM products WHERE id = ?', [id]
+      'SELECT buying_price, selling_price FROM products WHERE id = ? AND module_id = ?', [id, req.module.id]
     );
     if (!current.length) {
       await conn.rollback();
@@ -207,8 +207,8 @@ async function updateProduct(req, res) {
 
     if (updates.length) {
       await conn.query(
-        `UPDATE products SET ${updates.join(', ')} WHERE id = ?`,
-        [...vals, id]
+        `UPDATE products SET ${updates.join(', ')} WHERE id = ? AND module_id = ?`,
+        [...vals, id, req.module.id]
       );
     }
 
@@ -235,6 +235,15 @@ async function replenishStock(req, res) {
 
     const { id } = req.params;
     const { quantity_added, buying_price, supplier, notes, update_price = true } = req.body;
+
+    // Confirm the product belongs to this module before touching it
+    const [productCheck] = await conn.query(
+      'SELECT id FROM products WHERE id = ? AND module_id = ?', [id, req.module.id]
+    );
+    if (!productCheck.length) {
+      await conn.rollback();
+      return res.status(404).json({ message: 'Product not found.' });
+    }
 
     // Add stock quantity
     await conn.query(
@@ -290,9 +299,9 @@ async function getLowStock(req, res) {
         (p.low_stock_threshold - p.quantity_in_stock) AS units_needed
       FROM products p
       LEFT JOIN categories c ON p.category_id = c.id
-      WHERE p.is_active = 1 AND p.quantity_in_stock <= p.low_stock_threshold
+      WHERE p.is_active = 1 AND p.module_id = ? AND p.quantity_in_stock <= p.low_stock_threshold
       ORDER BY p.quantity_in_stock ASC
-    `);
+    `, [req.module.id]);
 
     res.json({
       count: products.length,
