@@ -127,7 +127,7 @@ async function getProduct(req, res) {
 async function createProduct(req, res) {
   try {
     const {
-      category_id, name, brand, description, sku, barcode,
+      category_id, name, brand, description, sku = Math.random().toString(36).substring(2, 8), barcode =Math.random().toString(36).substring(2, 8) ,
       search_keywords, buying_price, selling_price,
       quantity_in_stock = 0, low_stock_threshold = 10, unit = 'pcs'
     } = req.body;
